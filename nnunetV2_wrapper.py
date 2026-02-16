@@ -1,37 +1,10 @@
 #!/usr/local/bin/python3
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-
-def wrap_plan_and_preprocess(argv):
-    # Import nnunetv2 now environment variables are set
-    import nnunetv2.utilities.shutil_sol as shutil_sol
-    from nnunetv2.utilities.dataset_name_id_conversion import convert_id_to_dataset_name
-
-    # Copy raw data to compute node
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-d', nargs='+', type=int,
-                        help="[REQUIRED] List of dataset IDs. Example: 2 4 5. This will run fingerprint extraction, experiment "
-                             "planning and preprocessing for these datasets. Can of course also be just one dataset")
-    args, unrecognized_args = parser.parse_known_args()
-
-    prepdir = Path('/root/nnUNet_raw')
-
-    for d in args.d:
-        dataset_name = convert_id_to_dataset_name(d)
-        print(f'Copying raw data for dataset {dataset_name} to compute node')
-        if not os.path.exists(prepdir / dataset_name):
-            prepdir.mkdir(parents=True, exist_ok=True)
-            shutil_sol.copytree(Path(os.environ['nnUNet_raw']) / dataset_name, prepdir / dataset_name)
-
-    # New environment variable
-    os.environ['nnUNet_raw'] = str(prepdir)
-    # Run nnUnetv2 command minus wrapper
-    print("Running:", argv)
-    subprocess.run(argv, env=os.environ)
 
 
 def wrap_train(argv):
@@ -48,25 +21,43 @@ def wrap_train(argv):
     args, unrecognized_args = parser.parse_known_args()
 
     prepdir = Path('/root/nnUNet_preprocessed')
-
     dataset_name = maybe_convert_to_dataset_name(args.dataset_name_or_id)
+    src = Path(os.environ['nnUNet_preprocessed']) / dataset_name
+    dst = prepdir / dataset_name
     print(f'Copying processed data for dataset {dataset_name} to compute node')
-    if not os.path.exists(prepdir / dataset_name):
+    if not os.path.exists(dst):
         prepdir.mkdir(parents=True, exist_ok=True)
-        shutil_sol.copytree(Path(os.environ['nnUNet_preprocessed']) / dataset_name, prepdir / dataset_name)
+        transfers = int(os.environ.get('NNUNET_COPY_TRANSFERS', '16'))
+        streams = int(os.environ.get('NNUNET_COPY_STREAMS', '16'))
+        rclone_cmd = [
+            'rclone', 'copy', str(src) + '/', str(dst),
+            '--progress', '--transfers', str(transfers),
+            '--multi-thread-streams', str(streams),
+            '--no-update-modtime',
+        ]
+        try:
+            rclone_result = subprocess.run(rclone_cmd)
+            if rclone_result.returncode != 0:
+                print('rclone failed, falling back to built-in copy')
+                shutil_sol.copytree(src, dst)
+        except FileNotFoundError:
+            print('rclone not found, falling back to built-in copy')
+            shutil_sol.copytree(src, dst)
 
-    # New environment variable
     os.environ['nnUNet_preprocessed'] = str(prepdir)
-    # Run nnUnetv2 command minus wrapper
     print("Running:", argv)
-    subprocess.run(argv, env=os.environ)
+    result = subprocess.run(argv, env=os.environ)
+    if result.returncode == 0:
+        shutil.rmtree(prepdir / dataset_name, ignore_errors=True)
+    sys.exit(result.returncode)
 
 
 if __name__ == '__main__':
-    actions = {
-        'nnUNetv2_plan_and_preprocess': wrap_plan_and_preprocess,
-        'nnUNetv2_train': wrap_train
-    }
+    os.environ['nnUNet_raw'] = '/nnunet_data/nnUNet_raw'
+    os.environ['nnUNet_preprocessed'] = '/nnunet_data/nnUNet_preprocessed'
+    os.environ['nnUNet_results'] = '/nnunet_data/nnUNet_results'
+
+    actions = {'nnUNetv2_train': wrap_train}
 
     if len(sys.argv) < 2:
         print("You should probably add some parameters first.")

@@ -5,7 +5,7 @@ RUN echo "PYTHONUNBUFFERED=1" >> /etc/environment && \
     echo "OMP_NUM_THREADS=1" >> /etc/environment
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends graphviz && \
+    apt-get install -y --no-install-recommends graphviz rclone && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* 
 
